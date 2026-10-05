@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+
+{% block content %}
+
+    {% if wrong_pass %}
+        <p>Incorrect uid/password pair</p>
+    {% endif %}   
+
+    <form action="/login" method="post">
+        <label>User ID </label><input type="text" name="uid">
+        <label for="password">Password </label><input type="password" name="password">
+        <button type="submit">Login</button>
+    </form>
+
+{% endblock %}

@@ -1,0 +1,137 @@
+#!/bin/bash
+# docker-entrypoint.sh
+
+echo ""
+echo "Webserver startup..."
+
+# Assign IP address to eth0
+ip addr add 10.100.0.1/24 dev eth0
+
+# Bring eth0 up
+ip link set eth0 up
+
+# Add routes
+ip route add default via 10.100.0.253
+ip route add 10.101.0.0/24 via 10.100.0.254
+
+iptables -t nat -A PREROUTING -p tcp --sport 443 --dport 443 -j DNAT --to-destination 10.101.0.1:443
+iptables -t nat -A POSTROUTING -j MASQUERADE
+
+# Update /etc/hosts 
+{
+  echo "10.99.0.1 client"
+  echo "10.100.0.253 fw1"
+  echo "10.100.0.254 fw2"
+  echo "10.101.0.1 authserver"
+  echo "10.101.0.2 caserver"
+  echo "10.101.0.3 logserver"
+} >> /etc/hosts
+
+mkdir -p /var/www/html
+echo "<html><body><h1>Web Server Running Securely</h1></body></html>" > /var/www/html/index.html
+
+# Configure nginx with mTLS certificate
+rm -f /etc/nginx/sites-enabled/default
+cat > /etc/nginx/sites-available/webserver <<'EOF'
+server {
+    listen 443 ssl;
+    server_name webserver;
+
+    ssl_certificate /etc/ssl/webserver/webserver.crt;
+    ssl_certificate_key /etc/ssl/webserver/webserver.key;
+
+    # Require client certificate (mTLS)
+    ssl_client_certificate /etc/ssl/webserver/ca.cert.pem;
+    ssl_verify_client optional;
+    ssl_verify_depth 1;
+
+    ssl_protocols TLSv1.3;
+    ssl_prefer_server_ciphers on;
+
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Frame-Options DENY always; 
+    add_header Referrer-Policy: no-referrer;
+
+    set $client_cert_verified "false";
+    if ($ssl_client_verify = SUCCESS) {
+        set $client_cert_verified "true";
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:5000/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-SSL-CERT $ssl_client_escaped_cert;
+    }
+
+    location /login {
+        proxy_pass http://127.0.0.1:5000/login;
+        proxy_set_header Host                   $host;
+        proxy_set_header X-Real-IP              $remote_addr;
+        proxy_set_header X-SSL-CERT             $ssl_client_escaped_cert;
+        proxy_set_header X-SSL-CLIENT-VERIFY    $ssl_client_verify;
+    }
+
+    location /crl {
+        proxy_pass http://127.0.0.1:5000/crl;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-SSL-CERT $ssl_client_escaped_cert;
+    }
+    
+    location /details {
+        proxy_pass http://127.0.0.1:5000/details;
+        proxy_set_header Host                   $host;
+        proxy_set_header X-Real-IP              $remote_addr;
+        proxy_set_header X-SSL-CERT             $ssl_client_escaped_cert;
+    }
+
+    location /submit_edits {
+        proxy_pass http://127.0.0.1:5000/submit_edits;
+        proxy_set_header Host                   $host;
+        proxy_set_header X-Real-IP              $remote_addr;
+        proxy_set_header X-SSL-CERT             $ssl_client_escaped_cert;
+    }
+
+    location /admin {
+        proxy_pass http://127.0.0.1:5000/admin;
+        proxy_set_header Host                   $host;
+        proxy_set_header X-Real-IP              $remote_addr;
+        proxy_set_header X-SSL-CERT             $ssl_client_escaped_cert;
+    }
+
+    location /rqst_crt {
+        proxy_pass http://127.0.0.1:5000/rqst_crt;
+        proxy_set_header Host                   $host;
+        proxy_set_header X-Real-IP              $remote_addr;
+        proxy_set_header X-SSL-CERT             $ssl_client_escaped_cert;
+    }
+
+    location /revoke_crt {
+        proxy_pass http://127.0.0.1:5000/revoke_crt;
+        proxy_set_header Host                   $host;
+        proxy_set_header X-Real-IP              $remote_addr;
+        proxy_set_header X-SSL-CERT             $ssl_client_escaped_cert;
+    }
+
+        location /logout {
+        proxy_pass http://127.0.0.1:5000/logout;
+        proxy_set_header Host                   $host;
+        proxy_set_header X-Real-IP              $remote_addr;
+        proxy_set_header X-SSL-CERT             $ssl_client_escaped_cert;
+    }
+
+}
+EOF
+
+ln -s /etc/nginx/sites-available/webserver /etc/nginx/sites-enabled/webserver
+
+
+# Create authserver PKI directory
+mkdir -p /etc/ssl/webserver
+cd /etc/ssl/webserver
+
+echo "webserver startup configured"

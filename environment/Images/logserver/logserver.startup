@@ -1,0 +1,138 @@
+#!/bin/bash
+# docker-entrypoint.sh
+
+echo ""
+echo "Log Server startup..."
+
+# Assign IP address to eth0
+ip addr add 10.101.0.3/24 dev eth0
+
+# Bring eth0 up
+ip link set eth0 up
+
+# Add routes
+ip route add default via 10.101.0.1
+
+# Hosts file
+{
+  echo "10.99.0.1 client"
+  echo "10.100.0.253 fw1"
+  echo "10.100.0.1 webserver"
+  echo "10.101.0.254 fw2"
+  echo "10.101.0.1 authserver"
+  echo "10.101.0.2 caserver"
+} >> /etc/hosts
+
+# Set up basic local firewall rules
+iptables -P INPUT DROP
+iptables -P FORWARD DROP
+iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+iptables -A INPUT -i lo -j ACCEPT
+
+# Allow SSH ONLY from authserver
+iptables -A INPUT -p tcp -s 10.101.0.1 --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+
+# Allow HTTPS logs from AUTH SERVER
+iptables -A INPUT -p tcp -s 10.101.0.1 --dport 443 -m conntrack --ctstate NEW -j ACCEPT
+
+# Allow HTTPS logs from CA SERVER
+iptables -A INPUT -p tcp -s 10.101.0.2 --dport 443 -m conntrack --ctstate NEW -j ACCEPT
+
+# Allow HTTPS logs from WEBSERVER
+iptables -A INPUT -p tcp -s 10.100.0.1 --dport 443 -m conntrack --ctstate NEW -j ACCEPT
+
+# Allow ICMP
+iptables -A INPUT -p icmp -j ACCEPT
+
+echo "Initializing and starting MySQL..."
+
+# create run directory (mysqld needs it)
+mkdir -p /var/run/mysqld
+chown -R mysql:mysql /var/run/mysqld
+
+mkdir -p /var/lib/mysql-files
+chown mysql:mysql /var/lib/mysql-files
+
+# initialize DB if missing
+if [ ! -d /var/lib/mysql/mysql ]; then
+    echo "Initializing MySQL data directory..."
+    mysqld --initialize --user=mysql --init-file=<(printf "ALTER USER 'root'@'localhost' IDENTIFIED BY '%s';" "$MYSQL_ROOT_PASSWORD")
+fi
+
+echo "Starting MySQL server..."
+su -s /bin/sh -c "/usr/sbin/mysqld --daemonize --pid-file=/var/run/mysqld/mysqld.pid" mysql
+sleep 2
+
+
+#  Initialize Logserver Database Schema (MySQL)
+if [ -f /root/logserver_schema.sql ]; then
+    mysql -u root -p"$MYSQL_ROOT_PASSWORD" < /root/logserver_schema.sql
+else
+    echo "ERROR: /root/logserver_schema.sql not found!"
+fi
+
+# create necessary MySQL users and grant privileges (for save_logs.py)
+echo "Creating MySQL users..."
+mysql -u root -p"$MYSQL_ROOT_PASSWORD" <<EOF
+CREATE USER IF NOT EXISTS '${DB_USER_LOGAPP}'@'localhost' IDENTIFIED BY '${DB_PASS_LOGAPP}';
+GRANT INSERT ON cert_archive_db.archived_certificates TO '${DB_USER_LOGAPP}'@'localhost';
+GRANT INSERT ON userdb_backup_db.user_snapshots TO '${DB_USER_LOGAPP}'@'localhost';
+GRANT INSERT ON log_backup_db.logs TO '${DB_USER_LOGAPP}'@'localhost';
+GRANT INSERT ON log_backup_db.config_backups TO '${DB_USER_LOGAPP}'@'localhost';
+
+CREATE USER IF NOT EXISTS '${DB_USER_READONLY}'@'localhost' IDENTIFIED BY '${DB_PASS_READONLY}';
+GRANT SELECT ON cert_archive_db.archived_certificates TO '${DB_USER_READONLY}'@'localhost';
+
+CREATE USER IF NOT EXISTS '${DB_USER_REVOKE}'@'localhost' IDENTIFIED BY '${DB_PASS_REVOKE}';
+GRANT SELECT ON cert_archive_db.archived_certificates TO '${DB_USER_REVOKE}'@'localhost';
+GRANT UPDATE ON cert_archive_db.archived_certificates TO '${DB_USER_REVOKE}'@'localhost';
+
+FLUSH PRIVILEGES;
+EOF
+
+# Nginx config for mTLS + reverse proxy to Flask
+rm -f /etc/nginx/sites-enabled/default
+cat > /etc/nginx/sites-available/logserver <<'NGINX_CONF'
+server {
+    listen 443 ssl;
+    server_name logserver;
+
+    ssl_certificate /etc/ssl/logserver/logserver.crt;
+    ssl_certificate_key /etc/ssl/logserver/logserver.key;
+
+    # Verify clients using the CA certificate
+    ssl_client_certificate /etc/ssl/logserver/ca.cert.pem;
+    ssl_verify_client on;
+    ssl_verify_depth 1;
+
+    # TLS policy
+    ssl_protocols TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Frame-Options DENY always; 
+    add_header Referrer-Policy: no-referrer;
+
+    location /archive/ {
+        proxy_pass http://127.0.0.1:5000/archive/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Client-Cert $ssl_client_s_dn;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+NGINX_CONF
+
+ln -s /etc/nginx/sites-available/logserver /etc/nginx/sites-enabled/logserver
+
+# Create authserver PKI directory
+mkdir -p /etc/ssl/logserver
+cd /etc/ssl/logserver
+
+# Restore executability here to have the executable bits set,
+# because Docker copies without executable permissions
+chmod +x /root/logserver.startserver 2>/dev/null || true
+
+echo "logserver startup configured"

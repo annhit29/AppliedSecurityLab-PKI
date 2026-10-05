@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo ""
+echo "FW1 startup..."
+
+# Interfaces
+IN_IF=eth0   # Internet / Client access
+DMZ_IF=eth1  # DMZ / Webserver
+
+# eth0 (towards client)
+ip addr add 10.99.0.254/24 dev "$IN_IF"
+ip link set "$IN_IF" up
+
+# eth1 (towards DMZ / webserver)
+ip addr add 10.100.0.253/24 dev "$DMZ_IF"
+ip link set "$DMZ_IF" up
+
+# Route to the internal 10.101.0.0/24 network via FW2
+ip route add 10.101.0.0/24 via 10.100.0.254
+
+# Hosts file
+{
+  echo "10.99.0.1 client"
+  echo "10.100.0.1 webserver"
+  echo "10.100.0.254 fw2"
+  echo "10.101.0.1 authserver"
+  echo "10.101.0.2 caserver"
+  echo "10.101.0.3 logserver"
+} >> /etc/hosts
+
+# Flush previous rules
+iptables -F
+iptables -t nat -F
+iptables -X
+
+# Default policies: DROP all
+iptables -P INPUT DROP
+iptables -P FORWARD DROP
+iptables -P OUTPUT DROP
+
+# --- Accept loopback ---
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
+
+# --- Accept established / related connections ---
+iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# --- INPUT rules ---
+# SSH access to firewall
+iptables -A INPUT -i "$IN_IF" -p tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+# Ping to firewall
+iptables -A INPUT -i "$IN_IF" -p icmp -j ACCEPT
+iptables -A INPUT -i "$DMZ_IF" -p icmp -j ACCEPT
+
+# --- FORWARD rules ---
+# HTTPS connections from client to webserver
+iptables -A FORWARD -i "$IN_IF" -o "$DMZ_IF" -p tcp -d 10.100.0.1 --dport 443 -m conntrack --ctstate NEW -j ACCEPT
+
+# ICMP from client to webserver (and not to fw2 or internal network)
+iptables -A FORWARD -i "$IN_IF" -o "$DMZ_IF" -p icmp -d 10.100.0.1 -m conntrack --ctstate NEW -j ACCEPT
+iptables -A FORWARD -i "$DMZ_IF" -o "$IN_IF" -p icmp -m conntrack --ctstate NEW -j ACCEPT
+
+# --- OUTPUT rules ---
+# ICMP from fw1 outwards
+iptables -A OUTPUT -p icmp -j ACCEPT
+
+# SSH from FW1 to webserver
+iptables -A OUTPUT -o "$DMZ_IF" -p tcp -d 10.100.0.1 --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+
+# SSH from FW1 to FW2
+iptables -A OUTPUT -o "$DMZ_IF" -p tcp -d 10.100.0.254 --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+
+
+# --- Start SSH service on the firewall ---
+echo "Starting SSH service..."
+service ssh start
+service ssh status
+
+echo "fw1 configured"

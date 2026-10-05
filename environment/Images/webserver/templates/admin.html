@@ -1,0 +1,30 @@
+{% extends 'base.html' %}
+
+{% block content %}
+
+<a href="/details">User Data</a>
+
+<h2>CA State Information</h2>
+
+<table>
+    <tbody>
+        <tr>
+            <th scope="row" align="left">Total Number of Issued Certificates</th>
+            <td align="right">{{ ca_info["issued_certificates"] }}</td>
+        </tr>
+        <tr>
+            <th scope="row" align="left">Number of Valid Certificates</th>
+            <td align="right">{{ ca_info["valid_certificates"] }}</td>
+        </tr>
+        <tr>
+            <th scope="row" align="left">Number of Revoked Certificates</th>
+            <td align="right">{{ ca_info["revoked_certificates"] }}</td>
+        </tr>
+        <tr>
+            <th scope="row" align="left">Current Serial Number</th>
+            <td align="right">{{ ca_info["serial_no"] }}</td>
+        </tr>
+    </tbody>
+</table>
+
+{% endblock %}

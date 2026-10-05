@@ -1,0 +1,20 @@
+{% extends 'base.html' %}
+
+{% block content %}
+
+<h2>
+    Certificate Revocation
+</h2>
+
+<div>
+    {% if status == 200 %}
+        <h3>Successfully revoked certificate(s)</h3>
+        <p style="white-space: pre;">{{response}}</p>
+    {% else %}
+        <h3>Revocation failed</h3>
+        <p>Status: {{status}}</p>
+        <p style="white-space: pre;">{{response}}</p>
+    {% endif %}
+</div>
+
+{% endblock %}

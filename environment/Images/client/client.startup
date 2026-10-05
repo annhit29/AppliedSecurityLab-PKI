@@ -1,0 +1,72 @@
+#!/bin/bash
+# needed for xfce4 to find the diplay
+set -e
+export DISPLAY=:0
+
+echo ""
+echo "Client startup..."
+
+{
+  echo "10.99.0.254 fw1"
+  echo "10.100.0.1 webserver"
+  echo "10.100.0.254 fw2"
+  echo "10.101.0.1 authserver"
+  echo "10.101.0.2 caserver"
+  echo "10.101.0.3 logserver"
+} >> /etc/hosts
+
+# Ip firewall configuration
+
+# Find the access network and the internal (access is the default route)
+BRIDGE_IF=eth0
+ACCESS_IF=eth1
+
+
+# Assign IP address to eth1
+ip addr add 10.99.0.1/24 dev "$ACCESS_IF"
+
+# Bring eth1 up
+ip link set "$ACCESS_IF" up
+
+# Add routes
+ip route add 10.100.0.0/24 via 10.99.0.254
+ip route add 10.101.0.0/24 via 10.99.0.254
+
+# Connections from host to Kathara network
+iptables -A INPUT -i "$BRIDGE_IF" -p tcp --dport 22 -j ACCEPT
+iptables -A INPUT -i "$BRIDGE_IF" -p tcp --dport 5900 -j ACCEPT
+iptables -A INPUT -i "$BRIDGE_IF" -p tcp --dport 6080 -j ACCEPT
+iptables -A OUTPUT -o "$BRIDGE_IF" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# By default drop everything (don't accept connections out of Kathara by default)
+iptables -P INPUT DROP
+iptables -P FORWARD DROP
+iptables -P OUTPUT DROP
+
+# Loopback
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
+
+# Clients may do anything towards the network interface... :D
+iptables -A INPUT -i "$ACCESS_IF" -j ACCEPT
+iptables -A FORWARD -o "$ACCESS_IF" -j ACCEPT
+iptables -A OUTPUT -o "$ACCESS_IF" -j ACCEPT
+
+# Make web root resolve to vnc.html automatically so students don't need to navigate to it manually
+ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html
+
+# Create virtual display and start x server
+Xvfb :0 -screen 0 1920x1080x24 >/dev/null 2>&1 &
+
+# wait until the x server starts, since startxfce tries to connect immediately
+until [ -S /tmp/.X11-unix/X0 ]; do sleep 0.1; done
+
+# start xfce and vnc server
+startxfce4 >/dev/null 2>&1 &
+
+x11vnc -forever -nopw -shared -display :0 -rfbport 5900 >/dev/null 2>&1 &
+
+# start websockify "proxy" to translate websocket traffic to tcp/rfb
+websockify --web=/usr/share/novnc/ 6080 localhost:5900 &
+
+echo "client configured"

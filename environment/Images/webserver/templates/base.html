@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+    <head>
+        <title>App</title>
+    </head>
+    <body>
+        <h1>
+            <a href="/">
+                Web Server
+            </a>
+        </h1>
+        {% with messages = get_flashed_messages() %}
+            {% if messages %}
+                {% for message in messages %}
+                    <p>{{ message }}</p>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        <div>
+            {% block content %}{% endblock %}
+        </div>
+        
+        {% if crl_page %}
+            <!-- nothing -->
+        {% else %} <p>
+            <a href="/crl">Certificate Revocation List</a>
+        </p>
+        {% endif %}
+        
+        {% if not_logged_in %}
+            <!-- nothing -->
+        {% else %} 
+            <p>
+                <a href="/logout">Logout</a>
+            </p>
+        {% endif %}   
+
+    </body>
+</html>

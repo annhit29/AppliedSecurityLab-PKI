@@ -1,0 +1,179 @@
+#!/bin/bash
+set -euo pipefail
+
+echo ""
+echo "Authserver startup..."
+
+# Assign IP address to eth0
+ip addr add 10.101.0.1/24 dev eth0
+
+# Bring eth0 up
+ip link set eth0 up
+
+# Add routes
+ip route add default via 10.101.0.254
+
+# Hosts file setup
+{
+  echo "10.99.0.1 client"
+  echo "10.100.0.253 fw1"
+  echo "10.100.0.1 webserver"
+  echo "10.101.0.254 fw2"
+  echo "10.101.0.2 caserver"
+  echo "10.101.0.3 logserver"
+} >> /etc/hosts
+
+# Set up basic local firewall rules 
+iptables -P INPUT DROP 
+iptables -P FORWARD DROP 
+iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 
+iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 
+
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A FORWARD -p icmp -j ACCEPT 
+
+# HTTPS access from webserver 
+iptables -A INPUT -p tcp -s 10.100.0.1 --dport 443 -m conntrack --ctstate NEW -j ACCEPT 
+# SSH access from fw2 
+iptables -A INPUT -p tcp -s 10.101.0.254 --dport 22 -m conntrack --ctstate NEW -j ACCEPT 
+# Ping to logserver 
+iptables -A INPUT -p icmp -j ACCEPT
+
+# Allow outgoing HTTPS to logserver (for forwarding logs)
+iptables -A OUTPUT -p tcp -d 10.101.0.3 --dport 443 -m conntrack --ctstate NEW -j ACCEPT
+
+#define rule to allow forwarding logs from webserver to logserver
+iptables -A FORWARD -p tcp -s 10.100.0.1 -d 10.101.0.3 --dport 443 -m conntrack --ctstate NEW -j ACCEPT
+
+# Configure nginx with mTLS certificate
+rm -f /etc/nginx/sites-enabled/default
+cat > /etc/nginx/sites-available/authserver <<'NGINX_CONF'
+server {
+    listen 443 ssl;
+    server_name authserver;
+
+    ssl_certificate /etc/ssl/authserver/authserver.crt;
+    ssl_certificate_key /etc/ssl/authserver/authserver.key;
+
+    # Verify clients using the CA certificate
+    ssl_client_certificate /etc/ssl/authserver/ca.cert.pem;
+    ssl_verify_client on;
+    ssl_verify_depth 1;
+
+    # TLS policy
+    ssl_protocols TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Frame-Options DENY always; 
+    add_header Referrer-Policy: no-referrer;
+
+    location /auth {
+        proxy_pass http://127.0.0.1:5000/auth;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location /certauth {
+        proxy_pass http://127.0.0.1:5000/certauth;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location /validate_token {
+        proxy_pass http://127.0.0.1:5000/validate_token;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location /crl {
+        proxy_pass http://127.0.0.1:5000/crl;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location /user_data {
+        proxy_pass http://127.0.0.1:5000/user_data;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location /edit_data {
+        proxy_pass http://127.0.0.1:5000/edit_data;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location /admin_data {
+        proxy_pass http://127.0.0.1:5000/admin_data;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location /invalidate_token {
+        proxy_pass http://127.0.0.1:5000/invalidate_token;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location /get_crt {
+        proxy_pass http://127.0.0.1:5000/get_crt;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location /revoke_crt {
+        proxy_pass http://127.0.0.1:5000/revoke_crt;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+NGINX_CONF
+
+ln -s /etc/nginx/sites-available/authserver /etc/nginx/sites-enabled/authserver
+
+echo "Starting MySQL..."
+
+# Prepare MySQL run directory
+mkdir -p /var/run/mysqld
+chown -R mysql:mysql /var/run/mysqld
+
+# Initialize MySQL data directory if needed
+if [ ! -d /var/lib/mysql/mysql ]; then
+    echo "Initializing MySQL data directory..."
+    mysqld --initialize --user=mysql --init-file=<(printf "ALTER USER 'root'@'localhost' IDENTIFIED BY '%s';" "$MYSQL_ROOT_PASSWORD")
+fi
+
+# Start the MySQL server
+su -s /bin/sh -c "/usr/sbin/mysqld --daemonize --pid-file=/var/run/mysqld/mysqld.pid" mysql
+sleep 2
+
+echo "Creating imovies database..."
+mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "CREATE DATABASE IF NOT EXISTS imovies;"
+
+echo "Importing synthetic user seed data..."
+mysql -u root -p"$MYSQL_ROOT_PASSWORD" imovies < /root/seed_users.sql
+
+echo "Adapting users schema (pwd -> password_sha256, add role)..."
+mysql -u root -p"$MYSQL_ROOT_PASSWORD" imovies <<'EOF'
+ALTER TABLE users
+  CHANGE COLUMN pwd password_sha256 VARCHAR(64) NOT NULL;
+
+ALTER TABLE users
+  ADD COLUMN role ENUM('user','admin') NOT NULL DEFAULT 'user';
+
+-- create one admin:
+UPDATE users SET role = 'admin' WHERE uid = 'ps';
+EOF
+
+echo "Creating DB users for authserver"
+mysql -u root -p"$MYSQL_ROOT_PASSWORD" <<EOF
+CREATE USER IF NOT EXISTS 'authserver'@'localhost' IDENTIFIED BY '${AUTH_DB_PASSWORD}';
+GRANT SELECT, UPDATE ON imovies.users TO 'authserver'@'localhost';
+
+FLUSH PRIVILEGES;
+EOF
+
+echo "authserver startup configured"

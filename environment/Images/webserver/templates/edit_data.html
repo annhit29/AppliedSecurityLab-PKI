@@ -1,0 +1,26 @@
+
+
+<form action="/submit_edits" method="post"> 
+    <h2>Edit your data</h2>
+    <p>
+        <label for="firstname">First Name (required):</label>
+        <input type="text" name="firstname" id="firstname" value="{{ user_data['firstname'] }}" required />
+    </p>
+    <p>
+        <label for="lastname">Last Name (required):</label>
+        <input type="text" name="lastname" id="lastname" value="{{ user_data['lastname'] }}" required />
+    </p>
+    <p>User ID: {{ user_data["uid"] }}</p> <!-- invariant -->
+    <p>
+        <label for="email">Email (required):</label>
+        <input type="email" name="email" id="email" value="{{ user_data['email'] }}" required />
+    </p>
+    <p>
+        <label for="pwd">Password:</label>
+        <input type="password" name="password" id="pwd" value="{{ user_data['pwd'] }}" /> 
+    </p>
+    <p>
+        <span><a href="/details">Cancel</a></span> <button>Submit changes</button>
+    </p>
+</form>
+

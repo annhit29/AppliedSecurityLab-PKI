@@ -1,0 +1,54 @@
+#!/bin/bash
+
+# Set permissions
+chmod 400 /etc/ssl/authserver/authserver.key
+chmod 444 /etc/ssl/authserver/authserver.crt
+chmod 444 /etc/ssl/authserver/ca.cert.pem
+
+# Send configs
+send_config() {
+  local FILE="$1"
+
+  if [[ -f "$FILE" ]]; then
+    local B64
+    B64=$(base64 -w0 "$FILE")
+
+    curl -s -X POST "https://logserver/archive/config" \
+      --cert /etc/ssl/authserver/authserver.crt \
+      --key  /etc/ssl/authserver/authserver.key \
+      --cacert /etc/ssl/authserver/ca.cert.pem \
+      -H "Content-Type: application/json" \
+      -d "{
+            \"file_path\": \"${FILE}\",
+            \"content\": \"${B64}\"
+          }" > /dev/null
+  fi
+}
+
+send_config "/etc/nginx/sites-available/authserver"
+
+# Initialize MySQL data directory if needed
+if [ ! -d /var/lib/mysql/mysql ]; then
+    echo "Initializing MySQL data directory..."
+    mysqld --initialize --user=mysql --init-file=<(printf "ALTER USER 'root'@'localhost' IDENTIFIED BY '%s';" "$MYSQL_ROOT_PASSWORD")
+fi
+if pgrep mysqld > /dev/null; then
+    echo "mysqld already running - skipping start"
+else
+    su -s /bin/sh -c "/usr/sbin/mysqld --daemonize --pid-file=/var/run/mysqld/mysqld.pid" mysql
+fi
+sleep 2
+
+# Start SSH service
+echo "Starting SSH service..."
+service ssh start
+
+# Start nginx
+echo "Starting nginx..."
+nginx -g "daemon off;" &
+
+# Start Flask with gunicorn
+echo "Starting Flask app..."
+gunicorn -w 2 -b 127.0.0.1:5000 auth:app &
+
+echo "authserver startserver configured"

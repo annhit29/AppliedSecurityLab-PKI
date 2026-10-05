@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+
+{% block content %}
+
+    <h2>Certificate Revocation List (CRL)</h2>
+    <div> <!-- style="white-space: pre;" Needed for proper line breaks on webpage -->
+        
+        {% if crl_len == 1 %}
+            <p>There is 1 element on CRL.</p>
+        {% else %}
+            <p>There are {{crl_len}} elements on the CRL.</p>
+        {% endif %}
+
+
+        {% if crl_len >= 1 %}
+            <h3>Serial numbers of revoked certificates:</h3>
+            <ul>
+                {% for sn in crl  %}
+                    <li>{{ sn }}</li>
+                {% endfor%}
+            </ul>
+        {% endif %}
+
+    </div>
+
+
+{% endblock %}
